@@ -17,6 +17,8 @@
      A4 best 在该局面是合法着法
      A5 pcs 落在 [12,53]
      A6 T 只能是 0 或 Tsched 里出现过的温度
+  B2 完整性: 对局序号是否连续(唯一能发现"数据根本没写进去"的检查)
+  B3 生成逻辑(全量): 走法可复原 / 确定段必走老师手 / 随机段确由选择器驱动
   B. 重复情况(不是错误, 但要知道)
      B1 完全相同的局面出现多少次
      B2 四重对称等价的局面出现多少次(训练时它们是同一个东西)
@@ -41,7 +43,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from othello import legal_moves, popcount, mv_to_pos, canonical   # noqa: E402
+from othello import (legal_moves, apply_move, popcount,   # noqa: E402
+                     mv_to_pos, canonical)
 
 REQUIRED = ('pcs', 'my', 'opp', 'best', 'score', 'g', 'src', 'T', 'L', 'SL')
 PCS_MIN, PCS_MAX = 12, 53
@@ -203,6 +206,65 @@ def main():
           % (len(per_game) - short - over, short, over,
              "PASS" if over == 0 else "**FAIL** (>42 不可能, 说明有重复写入)"))
     n_hard += over
+
+    # ---------- B3 生成逻辑: 对**全部**对局验证, 不是抽样 ----------
+    # 这三项原来只在 selftest.py 的 10 盘冒烟里跑过。它们完全可以从记录本身算出来
+    # (不需要引擎), 所以这里对全量数据再跑一遍 —— 把"设计成立"从抽样变成全覆盖。
+    print("\n" + "=" * 72)
+    print("B3. 生成逻辑(全量验证)")
+    by_game = collections.defaultdict(list)
+    for r in rows:
+        by_game[(r['src'], r['g'])].append(r)
+    n_link = n_link_bad = n_det = n_det_ok = n_rand = n_rand_diff = 0
+    bad_ex = []
+    for key, recs in by_game.items():
+        recs.sort(key=lambda x: x['pcs'])
+        for a, b in zip(recs, recs[1:]):
+            my, opp = int(a['my']), int(a['opp'])
+            nxt = (int(b['my']), int(b['opp']))
+            n_link += 1
+            legal = legal_moves(my, opp)
+            played = []
+            for pos in range(64):
+                if not ((legal >> pos) & 1):
+                    continue
+                nm, no = apply_move(my, opp, pos)
+                if legal_moves(no, nm):
+                    cand = (no, nm)          # 正常换边
+                elif legal_moves(nm, no):
+                    cand = (nm, no)          # 对手须 PASS, 轮回自己
+                else:
+                    continue                 # 终局, 不会再有记录
+                if cand == nxt:
+                    played.append(pos)
+            if not played:
+                n_link_bad += 1
+                if len(bad_ex) < args.show:
+                    bad_ex.append((key, a['pcs'], b['pcs']))
+                continue
+            best = mv_to_pos(a['best'])
+            if float(a['T']) == 0.0:
+                n_det += 1
+                n_det_ok += (best in played)
+            else:
+                n_rand += 1
+                n_rand_diff += (best not in played)
+    print("  相邻记录 %d 组, 复原失败 %d 组  %s"
+          % (n_link, n_link_bad, "PASS" if not n_link_bad else "**FAIL**"))
+    for key, p1, p2 in bad_ex:
+        print("        %s g=%s  pcs %d -> %d" % (key[0], key[1], p1, p2))
+    n_hard += n_link_bad
+    det_bad = n_det - n_det_ok
+    print("  确定段(T=0) %d 条, 实走 != 老师best 的 %d 条  %s"
+          % (n_det, det_bad, "PASS" if det_bad == 0 else "**FAIL**"))
+    n_hard += det_bad
+    if n_rand:
+        pr = n_rand_diff / float(n_rand)
+        ok = 0.02 < pr < 0.98
+        print("  随机段(T>0) %d 条, 实走 != 老师best 占 %.1f%%  %s"
+              % (n_rand, pr * 100,
+                 "PASS" if ok else "**FAIL**(0%=选择器没生效, 100%=老师被绕开)"))
+        n_hard += (not ok)
 
     # ---------- C 分布 ----------
     print("\n" + "=" * 72)
