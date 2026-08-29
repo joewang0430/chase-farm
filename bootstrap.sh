@@ -2,19 +2,30 @@
 # chase-farm 一键启动 —— 在机房任意一台机器上跑这一条命令即可。
 #
 #   ./bootstrap.sh              起工人(自动检测/编译引擎, 按核数决定并发)
-#   ./bootstrap.sh --check      只做环境自检, 不起工人
+#   ./bootstrap.sh --check      只做环境自检 + 引擎验收, 不起工人
 #   ./bootstrap.sh --workers 8  指定工人数
 #   ./bootstrap.sh --stop       全场收工(建 STOP 文件, 所有机器的工人下一局结束后退出)
 #   ./bootstrap.sh --resume     撤销 STOP
 #   ./bootstrap.sh --status     看本机工人数与全场产量
 #
-# 约定: 家目录是 NFS 共享的, 所有机器共用 $FARM_ROOT。
+# 约定: 家目录是 NFS 共享的, 所有机器共用 $FARM_ROOT ——
+#       引擎只需第一台编译一次, 开局池只生成一次, 分片全落到同一处, STOP 全场可见。
+#
+# 引擎 = Edax 4.6, 从源码编译。**不用官方 Makefile**, 理由:
+#   Makefile 的 gcc 优化档写死了 -flto=auto(需 gcc>=10) 和 ARCH=x86-64-v3(需 gcc>=11),
+#   而机房是 gcc 8.5, 两者都不认。Edax 提供 all.c 单文件合并版, 一条 gcc 命令即可编出
+#   等价的优化版本(本机实测 8 秒, 与参考引擎 40/40 逐字段一致)。
 set -u
 
 FARM_ROOT="${FARM_ROOT:-$HOME/chase_farm}"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENGINE_DIR="$FARM_ROOT/engine"
-ENGINE_BIN="$ENGINE_DIR/bin/Egaroucid_for_Console.out"
+ENGINE_BIN="$ENGINE_DIR/lEdax"
+EDAX_SRC="$FARM_ROOT/edax-reversi"
+# 钉死在**实测验证过**的 commit, 不用 v4.6 tag ——
+# v4.6 tag 的源码有 bug: 启动即 "hash_init: cannot allocate the hash table" 后退出(本机实测)。
+# 这个 commit 编出来的引擎与参考引擎 40/40 逐字段一致。
+EDAX_COMMIT="14f048c05ddfa385b6bf954a9c2905bbe677e9d3"
 OPENINGS="$FARM_ROOT/openings8.jsonl"
 SHARDS="$FARM_ROOT/shards"
 STOP_FILE="$FARM_ROOT/STOP"
@@ -36,12 +47,12 @@ case "${1:-}" in
   --resume)
     rm -f "$STOP_FILE"; log "已撤销 STOP(需重新起工人)"; exit 0 ;;
   --status)
-    n=$(pgrep -u "$USER" -f "farm/worker.py" 2>/dev/null | wc -l)
+    n=$(pgrep -u "$USER" -f "worker.py" 2>/dev/null | wc -l)
     log "本机 $HOST 工人数: $n"
     if [ -d "$SHARDS" ]; then
       files=$(ls "$SHARDS"/*.jsonl 2>/dev/null | wc -l)
       lines=$(cat "$SHARDS"/*.jsonl 2>/dev/null | wc -l)
-      hosts=$(ls "$SHARDS" 2>/dev/null | sed 's/_[0-9]*_[0-9]*\.jsonl//' | sort -u | wc -l)
+      hosts=$(ls "$SHARDS" 2>/dev/null | sed 's/_[0-9]*_[0-9]*_[0-9]*\.jsonl//' | sort -u | wc -l)
       log "全场: $hosts 台机器, $files 个分片, $lines 个局面"
     fi
     [ -f "$STOP_FILE" ] && log "注意: STOP 文件存在"
@@ -63,63 +74,88 @@ log "环境自检..."
 command -v python3 >/dev/null || die "没有 python3"
 PYV=$(python3 -c 'import sys; print("%d.%d"%sys.version_info[:2])')
 python3 -c 'import sys; sys.exit(0 if sys.version_info>=(3,6) else 1)' || die "python3 版本过低: $PYV (需 >=3.6)"
-NCORE=$(nproc 2>/dev/null || echo 4)
+NCORE=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 log "  主机=$HOST  python3=$PYV  核数=$NCORE"
 
-mkdir -p "$FARM_ROOT" "$SHARDS" "$LOGS" || die "无法创建 $FARM_ROOT"
+mkdir -p "$FARM_ROOT" "$SHARDS" "$LOGS" "$ENGINE_DIR/data" || die "无法创建 $FARM_ROOT"
 [ -w "$FARM_ROOT" ] || die "$FARM_ROOT 不可写"
 
-# ---------------- 2. 引擎(全场共用一份, 只有第一台需要编译) ----------------
+# ---------------- 2. 权重文件(跨平台通用, 随仓库带来, 校验 sha256) ----------------
+if [ ! -s "$ENGINE_DIR/data/eval.dat" ]; then
+  log "  安装 eval.dat ..."
+  [ -s "$REPO_DIR/edax_data/eval.dat" ] || die "仓库里缺 edax_data/eval.dat"
+  cp "$REPO_DIR/edax_data/eval.dat" "$REPO_DIR/edax_data/book.dat" "$ENGINE_DIR/data/" || die "复制 eval.dat 失败"
+fi
+if command -v sha256sum >/dev/null; then
+  GOT=$(sha256sum "$ENGINE_DIR/data/eval.dat" | cut -d' ' -f1)
+elif command -v shasum >/dev/null; then
+  GOT=$(shasum -a 256 "$ENGINE_DIR/data/eval.dat" | cut -d' ' -f1)
+else
+  GOT=""
+fi
+WANT=$(cut -d' ' -f1 "$REPO_DIR/edax_data/SHA256SUMS")
+if [ -n "$GOT" ] && [ "$GOT" != "$WANT" ]; then
+  die "eval.dat 校验不符!  期望 $WANT  实得 $GOT —— 权重文件损坏, 不能用"
+fi
+log "  eval.dat 校验通过"
+
+# ---------------- 3. 引擎(全场共用一份, 只有第一台需要编译) ----------------
 if [ -x "$ENGINE_BIN" ]; then
   log "  引擎已就绪(共享目录), 跳过编译"
 else
-  log "  引擎不存在, 开始编译(仅第一台机器需要, 约几分钟)..."
-  command -v cmake >/dev/null || die "没有 cmake, 无法编译引擎"
-  command -v git >/dev/null   || die "没有 git"
-  SRC="$FARM_ROOT/Egaroucid_src"
-  [ -d "$SRC" ] || git clone --depth 1 https://github.com/Nyanyan/Egaroucid.git "$SRC" \
-      || die "clone Egaroucid 失败"
-  # mac 上需要补 <bit>; Linux/GCC 通常不需要, 加了也无害
-  grep -q '#include <bit>' "$SRC/src/engine/bit_generic.hpp" || \
-    sed -i '0,/#include/s//#include <bit>\n#include/' "$SRC/src/engine/bit_generic.hpp"
-  ( cd "$SRC" && cmake -B build -DBUILD_CONSOLE=ON -DCMAKE_BUILD_TYPE=Release >/dev/null \
-      && cmake --build build -j "$NCORE" >/dev/null ) || die "编译失败"
-  mkdir -p "$ENGINE_DIR/bin"
-  cp "$SRC/bin/Egaroucid_for_Console.out" "$ENGINE_DIR/bin/" || die "找不到编译产物"
-  cp -r "$SRC/bin/resources" "$ENGINE_DIR/bin/" 2>/dev/null || true
+  log "  引擎不存在, 开始编译(仅第一台机器需要, 约 10 秒)..."
+  command -v git >/dev/null || die "没有 git"
+  CC_BIN=""
+  for c in gcc cc clang; do command -v "$c" >/dev/null && { CC_BIN="$c"; break; }; done
+  [ -n "$CC_BIN" ] || die "找不到 C 编译器(gcc/cc/clang)"
+  log "    编译器: $CC_BIN ($($CC_BIN --version | head -1))"
+
+  if [ ! -d "$EDAX_SRC" ]; then
+    git clone --quiet https://github.com/abulmo/edax-reversi.git "$EDAX_SRC" \
+      || die "clone Edax 失败(网络?)"
+    ( cd "$EDAX_SRC" && git checkout --quiet "$EDAX_COMMIT" ) \
+      || die "切到验证过的 commit $EDAX_COMMIT 失败"
+  fi
+  [ -s "$EDAX_SRC/src/all.c" ] || die "源码里找不到 src/all.c(Edax 版本不对?)"
+
+  # -march: 机房 gcc 8.5 不认 x86-64-v3, 用 native 让编译器自己探测(实测 CPU 有 avx2)
+  # -lrt: Linux 需要; macOS 没有这个库
+  EXTRA_LIB=""
+  [ "$(uname -s)" = "Linux" ] && EXTRA_LIB="-lrt"
+  ( cd "$EDAX_SRC/src" && $CC_BIN -std=c17 -O3 -flto -ffast-math -fomit-frame-pointer \
+      -DNDEBUG -D_GNU_SOURCE=1 -march=native -w all.c -o "$ENGINE_BIN" -lm $EXTRA_LIB ) \
+    || die "编译失败 —— 手动重试:
+    cd $EDAX_SRC/src
+    $CC_BIN -std=c17 -O3 -DNDEBUG -D_GNU_SOURCE=1 -march=native -w all.c -o $ENGINE_BIN -lm $EXTRA_LIB
+  (若报 -march=native 不支持, 换成 -march=haswell; 再不行去掉 -march 整项)"
   log "  引擎编译完成 -> $ENGINE_BIN"
 fi
 
-# ---------------- 3. 开局池 ----------------
+# ---------------- 4. 引擎验收(编译成功 != 答案正确) ----------------
+log "  引擎验收(标准答案向量)..."
+# 注意: 不要写成 `python3 ... | sed ... || die` —— 管道的退出码取的是 sed 的,
+# die 永远不会触发, 闸门形同虚设(本机实测踩过: 验收明明失败却报"自检通过")。
+if ! python3 "$REPO_DIR/verify_engine.py" "$ENGINE_BIN" \
+       --vectors "$REPO_DIR/known_answers.jsonl" > "$FARM_ROOT/.verify.out" 2>&1; then
+  sed 's/^/    /' "$FARM_ROOT/.verify.out" >&2
+  die "引擎验收失败 —— 这个引擎会产出错误标签, 已中止"
+fi
+sed 's/^/    /' "$FARM_ROOT/.verify.out"
+
+# ---------------- 5. 开局池 ----------------
 if [ -s "$OPENINGS" ]; then
   log "  开局池已就绪: $(wc -l < "$OPENINGS") 条"
 else
-  log "  生成 8 手开局池(对称去重全枚举)..."
+  log "  生成 8 手开局池(对称去重全枚举, 约 1 分钟)..."
   python3 "$REPO_DIR/make_openings.py" --out "$OPENINGS" || die "开局池生成失败"
 fi
-
-# ---------------- 4. 引擎冒烟 ----------------
-log "  引擎冒烟测试..."
-python3 - "$ENGINE_BIN" <<'EOF' || die "引擎冒烟失败"
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])) or '.', ''))
-sys.path.insert(0, os.environ.get('FARM_REPO', '.'))
-from worker import Egaroucid
-from othello import INIT_BLACK, INIT_WHITE, pos_to_mv
-e = Egaroucid(sys.argv[1])
-pos, score = e.hint(INIT_BLACK, INIT_WHITE)
-e.close()
-if pos is None:
-    sys.exit(1)
-print("    初始局面 -> %s (%+d)" % (pos_to_mv(pos), score))
-EOF
 
 if [ "$CHECK_ONLY" = "1" ]; then
   log "自检通过(未起工人)"
   exit 0
 fi
 
-# ---------------- 5. 起工人 ----------------
+# ---------------- 6. 起工人 ----------------
 [ -f "$STOP_FILE" ] && die "STOP 文件存在, 先 ./bootstrap.sh --resume"
 
 if [ "$WORKERS" = "0" ]; then
@@ -127,8 +163,8 @@ if [ "$WORKERS" = "0" ]; then
   [ "$WORKERS" -lt 1 ] && WORKERS=1
 fi
 
-RUNNING=$(pgrep -u "$USER" -f "farm/worker.py" 2>/dev/null | wc -l)
-[ "$RUNNING" -gt 0 ] && die "本机已有 $RUNNING 个工人在跑, 先 --stop 或 pkill -f farm/worker.py"
+RUNNING=$(pgrep -u "$USER" -f "worker.py" 2>/dev/null | wc -l)
+[ "$RUNNING" -gt 0 ] && die "本机已有 $RUNNING 个工人在跑, 先 --stop 或 pkill -u $USER -f worker.py"
 
 command -v tmux >/dev/null || die "没有 tmux"
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null
@@ -141,5 +177,6 @@ for i in $(seq 1 "$WORKERS"); do
        2>> '$LOGS/${HOST}_w${i}.log'"
 done
 log "已在 $HOST 起 $WORKERS 个工人(nice 10, tmux 会话 '$TMUX_SESSION')"
+log "  每个工人 = 2 个 Edax 进程(老师 L15 + 选择器 L5), 常驻内存约 165MB"
 log "  看现场: tmux attach -t $TMUX_SESSION   |   看进度: $0 --status"
 log "  全场收工: $0 --stop"
