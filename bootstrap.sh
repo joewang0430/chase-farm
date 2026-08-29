@@ -119,15 +119,18 @@ else
   [ -s "$EDAX_SRC/src/all.c" ] || die "源码里找不到 src/all.c(Edax 版本不对?)"
 
   # -march: 机房 gcc 8.5 不认 x86-64-v3, 用 native 让编译器自己探测(实测 CPU 有 avx2)
-  # -lrt: Linux 需要; macOS 没有这个库
-  EXTRA_LIB=""
-  [ "$(uname -s)" = "Linux" ] && EXTRA_LIB="-lrt"
+  # -pthread: Edax 用 C11 threads。RHEL8 的 glibc 2.28 把 cnd_broadcast 等放在 libpthread,
+  #           不加会报 "undefined reference to cnd_broadcast@@GLIBC_2.28"(机房实测)。
+  # -lrt: Linux 需要; macOS 没有这个库(pthread 在 libSystem 里, -pthread 加了也无害)
+  EXTRA_LIB="-pthread"
+  [ "$(uname -s)" = "Linux" ] && EXTRA_LIB="-pthread -lrt"
   ( cd "$EDAX_SRC/src" && $CC_BIN -std=c17 -O3 -flto -ffast-math -fomit-frame-pointer \
       -DNDEBUG -D_GNU_SOURCE=1 -march=native -w all.c -o "$ENGINE_BIN" -lm $EXTRA_LIB ) \
     || die "编译失败 —— 手动重试:
     cd $EDAX_SRC/src
     $CC_BIN -std=c17 -O3 -DNDEBUG -D_GNU_SOURCE=1 -march=native -w all.c -o $ENGINE_BIN -lm $EXTRA_LIB
-  (若报 -march=native 不支持, 换成 -march=haswell; 再不行去掉 -march 整项)"
+  若报 undefined reference to cnd_* / thrd_* , 在末尾再加 -lpthread
+  若报 -march=native 不支持, 换成 -march=haswell; 再不行去掉 -march 整项"
   log "  引擎编译完成 -> $ENGINE_BIN"
 fi
 
