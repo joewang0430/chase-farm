@@ -180,6 +180,10 @@ for i in $(seq 1 "$WORKERS"); do
        2>> '$LOGS/${HOST}_w${i}.log'"
 done
 log "已在 $HOST 起 $WORKERS 个工人(nice 10, tmux 会话 '$TMUX_SESSION')"
-log "  每个工人 = 2 个 Edax 进程(老师 L15 + 选择器 L5), 常驻内存约 165MB"
+# 档位从 worker.py 读, 不写死 —— 写死过一次, 改了 TEACHER_LEVEL 却漏了这句提示
+LVLS=$(python3 -c "import sys; sys.path.insert(0,'$REPO_DIR'); import worker; \
+print('老师 L%d(hint%d) + 选择器 L%d(hint%d)' % (worker.TEACHER_LEVEL, worker.TEACHER_HINT, \
+worker.SELECTOR_LEVEL, worker.SELECTOR_HINT))" 2>/dev/null || echo "老师+选择器")
+log "  每个工人 = 2 个 Edax 进程($LVLS), 常驻内存约 165MB"
 log "  看现场: tmux attach -t $TMUX_SESSION   |   看进度: $0 --status"
 log "  全场收工: $0 --stop"

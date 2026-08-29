@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""分片汇总与校验 —— 数据进训练之前的最后一道闸。
+
+用法:
+  python3 farm/collect.py ~/chase_farm/shards                     # 只校验+出报告
+  python3 farm/collect.py ~/chase_farm/shards --out clean.jsonl   # 顺便写出去重后的数据
+  python3 farm/collect.py ~/chase_farm/shards --verify 100 \\
+      --engine ~/chase_farm/engine/lEdax                          # 再抽 100 条用引擎回验标签
+
+它检查的东西分三类, **硬错误一条都不该有**:
+
+  A. 结构完整性(硬错误)
+     A1 必需字段齐全、类型正确
+     A2 my 与 opp 无重叠(同一格不能既是我又是对手)
+     A3 popcount(my|opp) == pcs(记录的子数必须和位棋盘一致)
+     A4 best 在该局面是合法着法
+     A5 pcs 落在 [12,53]
+     A6 T 只能是 0 或 Tsched 里出现过的温度
+  B. 重复情况(不是错误, 但要知道)
+     B1 完全相同的局面出现多少次
+     B2 四重对称等价的局面出现多少次(训练时它们是同一个东西)
+     B3 **重复局面的标签是否自相矛盾** —— 同一个局面两次给出不同的 best/score,
+        说明引擎不确定或数据被污染, 这个必须为 0
+  C. 分布(供判断数据是否均衡)
+     C1 每个 pcs 的条数
+     C2 评分分布、一边倒(|score|>=24)占比
+     C3 T 的分布(随机段 vs 确定段的比例)
+     C4 各工人/主机的产量
+
+退出码: 0 = 无硬错误; 1 = 有硬错误。
+"""
+
+import argparse
+import collections
+import glob
+import json
+import os
+import random
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from othello import legal_moves, popcount, mv_to_pos, canonical   # noqa: E402
+
+REQUIRED = ('pcs', 'my', 'opp', 'best', 'score', 'g', 'src', 'T', 'L', 'SL')
+PCS_MIN, PCS_MAX = 12, 53
+
+
+def load(paths):
+    rows, bad_json = [], 0
+    for p in paths:
+        with open(p) as f:
+            for ln, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    bad_json += 1
+    return rows, bad_json
+
+
+def check_structure(rows):
+    """返回 {错误名: [(下标, 说明), ...]}"""
+    errs = collections.OrderedDict(
+        (k, []) for k in ('A1字段缺失或类型错', 'A2 my与opp重叠', 'A3 pcs与位棋盘不符',
+                          'A4 best不合法', 'A5 pcs越界', 'A6 T不在温度表内'))
+    for i, r in enumerate(rows):
+        try:
+            for k in REQUIRED:
+                if k not in r:
+                    raise KeyError(k)
+            my, opp, pcs = int(r['my']), int(r['opp']), int(r['pcs'])
+            score = int(r['score'])
+        except Exception as ex:
+            errs['A1字段缺失或类型错'].append((i, str(ex)))
+            continue
+        if my & opp:
+            errs['A2 my与opp重叠'].append((i, '重叠 %d 格' % popcount(my & opp)))
+            continue
+        if popcount(my | opp) != pcs:
+            errs['A3 pcs与位棋盘不符'].append((i, '记 %d 实 %d' % (pcs, popcount(my | opp))))
+        if not (PCS_MIN <= pcs <= PCS_MAX):
+            errs['A5 pcs越界'].append((i, 'pcs=%d' % pcs))
+        try:
+            pos = mv_to_pos(r['best'])
+            if not ((legal_moves(my, opp) >> pos) & 1):
+                errs['A4 best不合法'].append((i, 'pcs=%d best=%s' % (pcs, r['best'])))
+        except Exception as ex:
+            errs['A4 best不合法'].append((i, '解析失败 %s' % ex))
+        sched = str(r.get('Tsched', ''))
+        allowed = set([0.0])
+        for part in sched.replace(',', '/').split('/'):
+            try:
+                allowed.add(float(part))
+            except ValueError:
+                pass
+        if allowed != set([0.0]) and float(r['T']) not in allowed:
+            errs['A6 T不在温度表内'].append((i, 'T=%s 表=%s' % (r['T'], sched)))
+        _ = score
+    return errs
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('shards', help='分片目录, 或单个 jsonl')
+    ap.add_argument('--out', default=None, help='写出去重后的数据(按四重对称去重)')
+    ap.add_argument('--verify', type=int, default=0, help='抽多少条用引擎回验标签')
+    ap.add_argument('--engine', default=None, help='回验用的引擎路径')
+    ap.add_argument('--show', type=int, default=5, help='每类错误最多打印几条')
+    args = ap.parse_args()
+
+    paths = ([args.shards] if args.shards.endswith('.jsonl')
+             else sorted(glob.glob(os.path.join(args.shards, '*.jsonl'))))
+    if not paths:
+        print("没找到分片: %s" % args.shards)
+        return 1
+    rows, bad_json = load(paths)
+    print("=" * 72)
+    print("分片 %d 个, 记录 %d 条%s"
+          % (len(paths), len(rows), (", **JSON 解析失败 %d 行**" % bad_json) if bad_json else ""))
+    if not rows:
+        return 1
+
+    games = {(r['src'], r['g']) for r in rows}
+    hosts = {r['src'].split('_')[0] for r in rows}
+    print("对局 %d 盘, 平均 %.2f 局面/盘, 来自 %d 台机器 / %d 个工人"
+          % (len(games), len(rows) / float(len(games)), len(hosts),
+             len({r['src'] for r in rows})))
+    print("老师档位 %s   选择器档位 %s   温度策略 %s"
+          % (sorted({r['L'] for r in rows}), sorted({r['SL'] for r in rows}),
+             sorted({str(r.get('Tsched', '?')) for r in rows})))
+
+    # ---------- A 结构完整性 ----------
+    print("\n" + "=" * 72)
+    print("A. 结构完整性(硬错误)")
+    errs = check_structure(rows)
+    n_hard = bad_json
+    for name, lst in errs.items():
+        n_hard += len(lst)
+        flag = "PASS" if not lst else "**FAIL**"
+        print("  %-22s %6d 条  %s" % (name, len(lst), flag))
+        for i, why in lst[:args.show]:
+            print("        #%d %s" % (i, why))
+
+    # ---------- B 重复 ----------
+    print("\n" + "=" * 72)
+    print("B. 重复情况")
+    exact = collections.defaultdict(list)
+    canon = collections.defaultdict(list)
+    for i, r in enumerate(rows):
+        my, opp = int(r['my']), int(r['opp'])
+        exact[(my, opp)].append(i)
+        canon[canonical(my, opp)].append(i)
+    n_uniq_e, n_uniq_c = len(exact), len(canon)
+    print("  完全相同的局面: %d 个不同局面, 去重率 %.2f%%"
+          % (n_uniq_e, (1 - n_uniq_e / float(len(rows))) * 100))
+    print("  四重对称等价后: %d 个不同局面, 去重率 %.2f%%"
+          % (n_uniq_c, (1 - n_uniq_c / float(len(rows))) * 100))
+    conflict = []
+    for key, idxs in exact.items():
+        if len(idxs) < 2:
+            continue
+        labs = {(rows[i]['best'], rows[i]['score']) for i in idxs}
+        if len(labs) > 1:
+            conflict.append((key, sorted(labs)[:3], len(idxs)))
+    print("  **同一局面标签自相矛盾**: %d 处  %s"
+          % (len(conflict), "PASS" if not conflict else "**FAIL**"))
+    for key, labs, n in conflict[:args.show]:
+        print("        出现%d次, 标签有 %s" % (n, labs))
+    n_hard += len(conflict)
+
+    # ---------- C 分布 ----------
+    print("\n" + "=" * 72)
+    print("C. 分布")
+    by_pcs = collections.Counter(r['pcs'] for r in rows)
+    exp = len(rows) / float(PCS_MAX - PCS_MIN + 1)
+    worst = max(by_pcs.values()) / exp - 1, 1 - min(by_pcs.values()) / exp
+    print("  C1 pcs 覆盖 %d/%d 档, 每档期望 %.0f 条, 实际 %d~%d (偏离 -%.0f%% ~ +%.0f%%)"
+          % (len(by_pcs), PCS_MAX - PCS_MIN + 1, exp, min(by_pcs.values()),
+             max(by_pcs.values()), worst[1] * 100, worst[0] * 100))
+    miss = [p for p in range(PCS_MIN, PCS_MAX + 1) if p not in by_pcs]
+    if miss:
+        print("        **缺失的 pcs**: %s" % miss)
+    sc = [r['score'] for r in rows]
+    a = sorted(abs(s) for s in sc)
+    print("  C2 |score| 中位 %d 均值 %.1f, 一边倒(>=24) %.1f%%, 正/负/零 %.1f/%.1f/%.1f%%"
+          % (a[len(a) // 2], sum(a) / float(len(a)),
+             sum(1 for s in a if s >= 24) / float(len(a)) * 100,
+             sum(1 for s in sc if s > 0) / float(len(sc)) * 100,
+             sum(1 for s in sc if s < 0) / float(len(sc)) * 100,
+             sum(1 for s in sc if s == 0) / float(len(sc)) * 100))
+    tc = collections.Counter(r['T'] for r in rows)
+    print("  C3 温度分布: " + ", ".join(
+        "T=%s %.1f%%" % (t, n / float(len(rows)) * 100) for t, n in sorted(tc.items())))
+    per_src = collections.Counter(r['src'] for r in rows)
+    v = sorted(per_src.values())
+    print("  C4 工人产量: 最少 %d, 中位 %d, 最多 %d (差异 %.0f%%)"
+          % (v[0], v[len(v) // 2], v[-1], (v[-1] / float(v[0]) - 1) * 100 if v[0] else 0))
+
+    # ---------- D 抽样回验 ----------
+    if args.verify:
+        print("\n" + "=" * 72)
+        print("D. 抽样回验(用独立新起的引擎重问 hint 1)")
+        if not args.engine:
+            print("  跳过: 没给 --engine")
+        else:
+            from worker import Edax, TEACHER_HINT
+            lvl = sorted({r['L'] for r in rows})[0]
+            e = Edax(args.engine, level=lvl)
+            rng = random.Random(20260829)
+            sample = rng.sample(rows, min(args.verify, len(rows)))
+            bad_b = bad_s = no_resp = 0
+            for r in sample:
+                got = e.hint(int(r['my']), int(r['opp']), TEACHER_HINT)
+                if not got:
+                    no_resp += 1
+                    continue
+                if got[0][0] != mv_to_pos(r['best']):
+                    bad_b += 1
+                if got[0][1] != r['score']:
+                    bad_s += 1
+            e.close()
+            ok = (bad_b == 0 and bad_s == 0)
+            print("  L%d 抽查 %d 条: best 不符 %d, score 不符 %d, 无响应 %d  %s"
+                  % (lvl, len(sample), bad_b, bad_s, no_resp, "PASS" if ok else "**FAIL**"))
+            n_hard += bad_b + bad_s
+
+    # ---------- 写出 ----------
+    if args.out:
+        keep = [rows[idxs[0]] for idxs in canon.values()]
+        with open(args.out, 'w') as f:
+            for r in keep:
+                f.write(json.dumps(r, separators=(',', ':')) + "\n")
+        print("\n已写出去重数据: %s (%d 条, 按四重对称去重)" % (args.out, len(keep)))
+
+    print("\n" + "=" * 72)
+    print("硬错误合计: %d  ->  %s" % (n_hard, "数据可用" if n_hard == 0 else "**数据有问题, 不要用**"))
+    return 0 if n_hard == 0 else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
