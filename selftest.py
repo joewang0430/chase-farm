@@ -12,7 +12,7 @@
         若误把选择器的着法用在确定段, 此检验必炸。
   检验3 随机段确实由选择器驱动: T>0 的记录里, 实走 != best 的比例须显著大于 0
         (若为 0, 说明选择器没生效或被老师覆盖)且显著小于 1(若接近均匀, 说明温度没生效)。
-  检验4 标签溯源: 随机抽若干记录, 用**独立新起的 Edax L15 引擎**重问 hint 1,
+  检验4 标签溯源: 随机抽若干记录, 用**独立新起的老师档位引擎**重问 hint 1,
         best 与 score 必须逐字段相等。若标签被选择器(L5)污染, 此检验必炸。
   检验5 字段自洽: pcs 落在 [12,53]; T 与该 pcs 所属阶段的温度一致; L/SL 与命令行一致。
 
@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from othello import legal_moves, apply_move, popcount, mv_to_pos   # noqa: E402
 from worker import (Edax, stage_temp, parse_temps,            # noqa: E402
-                    TEACHER_HINT, PCS_MIN, PCS_MAX)
+                    TEACHER_HINT, TEACHER_LEVEL, SELECTOR_LEVEL, PCS_MIN, PCS_MAX)
 
 
 def successors(my, opp):
@@ -57,8 +57,8 @@ def main():
     ap.add_argument('--engine', required=True)
     ap.add_argument('--openings', required=True)
     ap.add_argument('--games', type=int, default=6)
-    ap.add_argument('--level', type=int, default=15)
-    ap.add_argument('--sel-level', type=int, default=5)
+    ap.add_argument('--level', type=int, default=TEACHER_LEVEL)
+    ap.add_argument('--sel-level', type=int, default=SELECTOR_LEVEL)
     ap.add_argument('--temperature', default='6')
     ap.add_argument('--relabel', type=int, default=25, help='检验4 抽查多少条')
     args = ap.parse_args()

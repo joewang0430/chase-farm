@@ -7,7 +7,7 @@
 为什么需要它: 机房是自己从源码编译 Edax, 编译成功**不等于**答案正确 ——
 eval.dat 版本不符、编译参数出错、CPU 指令集不匹配, 都可能让引擎跑得起来但答错。
 那样产出的数据是坏的, 而且事后极难发现。
-标准答案向量是本机用已验证的参考引擎(Edax 4.6 + sha256 已知的 eval.dat)生成的:
+标准答案向量是本机用已验证的参考引擎(Edax 4.6 + sha256 已知的 eval.dat)在**老师档位**上生成的:
 best 与 score 必须**逐字段完全相等**, 有一条不符就判定不可用。
 
 退出码 0 = 通过, 非 0 = 不可用。
@@ -20,7 +20,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from worker import Edax, TEACHER_HINT   # noqa: E402
+from worker import Edax, TEACHER_HINT, TEACHER_LEVEL   # noqa: E402
 from othello import mv_to_pos           # noqa: E402
 
 
@@ -28,7 +28,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('engine')
     ap.add_argument('--vectors', default=os.path.join(HERE, 'known_answers.jsonl'))
-    ap.add_argument('--level', type=int, default=15)
+    ap.add_argument('--level', type=int, default=TEACHER_LEVEL)
     args = ap.parse_args()
 
     if not os.path.exists(args.vectors):
