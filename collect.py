@@ -133,8 +133,9 @@ def main():
           % (len(games), len(rows) / float(len(games)), len(hosts),
              len({r['src'] for r in rows})))
     print("老师档位 %s   选择器档位 %s   温度策略 %s"
-          % (sorted({r['L'] for r in rows}), sorted({r['SL'] for r in rows}),
-             sorted({str(r.get('Tsched', '?')) for r in rows})))
+          % (sorted({r.get('L', '缺') for r in rows}),
+             sorted({r.get('SL', '缺') for r in rows}),
+             sorted({str(r.get('Tsched', '缺')) for r in rows})))
 
     # ---------- A 结构完整性 ----------
     print("\n" + "=" * 72)
@@ -162,6 +163,25 @@ def main():
           % (n_uniq_e, (1 - n_uniq_e / float(len(rows))) * 100))
     print("  四重对称等价后: %d 个不同局面, 去重率 %.2f%%"
           % (n_uniq_c, (1 - n_uniq_c / float(len(rows))) * 100))
+    # 按 pcs 拆开: 开局池只有 6.7 万条, 所以 pcs 12 附近的局面池是**有限**的,
+    # 对局数一旦远超开局池规模, 低 pcs 段必然大量重复 —— 这是设计的必然, 不是 bug,
+    # 但它意味着 early 段的多样性有天花板, 直接影响"该生成多少数据"的判断。
+    canon_by_pcs = collections.defaultdict(set)
+    cnt_by_pcs = collections.Counter()
+    for r in rows:
+        canon_by_pcs[r['pcs']].add(canonical(int(r['my']), int(r['opp'])))
+        cnt_by_pcs[r['pcs']] += 1
+    print("  按 pcs 的对称去重率(只列非零的档):")
+    any_dup = False
+    for pcs in sorted(cnt_by_pcs):
+        n, u = cnt_by_pcs[pcs], len(canon_by_pcs[pcs])
+        if n > u:
+            any_dup = True
+            print("        pcs=%-3d %7d 条 -> %7d 个不同局面  重复 %.2f%%"
+                  % (pcs, n, u, (1 - u / float(n)) * 100))
+    if not any_dup:
+        print("        (各档均无重复)")
+
     conflict = []
     for key, idxs in exact.items():
         if len(idxs) < 2:
