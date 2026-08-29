@@ -172,6 +172,38 @@ def main():
         print("        出现%d次, 标签有 %s" % (n, labs))
     n_hard += len(conflict)
 
+    # ---------- B2 完整性: 有没有丢盘 ----------
+    # 工人的 g 是"自己的第几盘", 从 0 连续递增, 每盘写完即 flush。
+    # 若 NFS 丢了写入或文件被截断, g 序列就会出现空洞 ——
+    # 这是唯一能发现"数据根本没写进去"的办法(其余检查只能查已存在的数据对不对)。
+    print("\n" + "=" * 72)
+    print("B2. 完整性: 每个工人的对局序号是否连续")
+    holes = []
+    per_src_g = collections.defaultdict(set)
+    for r in rows:
+        per_src_g[r['src']].add(r['g'])
+    for src, gs in per_src_g.items():
+        lo, hi = min(gs), max(gs)
+        miss = (hi - lo + 1) - len(gs)
+        if miss:
+            holes.append((src, miss, lo, hi))
+    print("  工人 %d 个, 序号有空洞的 %d 个  %s"
+          % (len(per_src_g), len(holes), "PASS" if not holes else "**FAIL**"))
+    for src, miss, lo, hi in holes[:args.show]:
+        print("        %s 缺 %d 盘 (范围 %d~%d)" % (src, miss, lo, hi))
+    n_hard += len(holes)
+
+    # 每盘的局面数: 正常是 42(pcs 12..53 各一条), 提前终局会少
+    per_game = collections.Counter()
+    for r in rows:
+        per_game[(r['src'], r['g'])] += 1
+    short = sum(1 for v in per_game.values() if v < 42)
+    over = sum(1 for v in per_game.values() if v > 42)
+    print("  每盘局面数: =42 的 %d 盘, <42 的 %d 盘(提前终局, 正常), >42 的 %d 盘  %s"
+          % (len(per_game) - short - over, short, over,
+             "PASS" if over == 0 else "**FAIL** (>42 不可能, 说明有重复写入)"))
+    n_hard += over
+
     # ---------- C 分布 ----------
     print("\n" + "=" * 72)
     print("C. 分布")
