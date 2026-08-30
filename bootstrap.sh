@@ -90,8 +90,15 @@ while [ $# -gt 0 ]; do
     *) die "未知参数: $1" ;;
   esac
 done
+# TASKS_AUTO=1 表示用户没指定 --tasks, 由我们负责下载。
+# 用户显式给了 --tasks 就**绝不覆盖那个目录** —— 曾经踩过: 自带的小任务集被
+# "分片数不足 200" 判定为不完整, 直接下载官方分片解压覆盖, 把用户的数据冲没了。
+TASKS_AUTO=0
 if [ "$LABEL" = "1" ]; then
-  [ -n "$TASKS" ] || TASKS="$FARM_ROOT/tasks"
+  if [ -z "$TASKS" ]; then
+    TASKS="$FARM_ROOT/tasks"
+    TASKS_AUTO=1
+  fi
   [ -n "$LABEL_OUT" ] || LABEL_OUT="$FARM_ROOT/labeled"
 fi
 
@@ -175,7 +182,11 @@ sed 's/^/    /' "$FARM_ROOT/.verify.out"
 if [ "$LABEL" = "1" ]; then
   log "  标注模式: 跳过开局池"
   GOT_N=$(ls "$TASKS"/part_*.jsonl 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$GOT_N" = "$TASKS_N" ]; then
+  if [ "$TASKS_AUTO" = "0" ]; then
+    # 用户自带任务目录: 只检查非空, 绝不下载、绝不覆盖
+    [ "$GOT_N" -gt 0 ] || die "任务目录里没有 part_*.jsonl: $TASKS"
+    log "  使用指定的任务目录: $TASKS ($GOT_N 片)"
+  elif [ "$GOT_N" = "$TASKS_N" ]; then
     log "  任务分片已就绪: $GOT_N 片"
   else
     log "  下载任务分片(约 89MB)..."
