@@ -9,7 +9,8 @@
 #   ./bootstrap.sh --status     看本机工人数与全场产量
 #
 # **标注模式**(给现成局面打标签, 用于云端跑 WTHOR 任务, 不需要共享文件系统):
-#   ./bootstrap.sh --label --tasks <任务目录> --out <输出目录> [--machine i --machines N]
+#   ./bootstrap.sh --label --machine i --machines N
+#   任务分片会自动从 GitHub Release 下载并校验 sha256(不符即中止)。
 #   前面装引擎、校验、验收的步骤**完全复用**, 只是最后起 label_worker.py 而不是 worker.py。
 #   不生成开局池(标注用不上)。
 #
@@ -36,6 +37,12 @@ SHARDS="$FARM_ROOT/shards"
 STOP_FILE="$FARM_ROOT/STOP"
 LOGS="$FARM_ROOT/logs"
 RESERVE_CORES=4          # 给系统和其他用户留的核数
+
+# 标注任务分片: 放在 GitHub Release, 不进 git 历史(89MB 会让每次 clone 都变慢)。
+# sha256 必须核对 —— 传输出错会让几百核心小时跑在坏数据上, 而且事后极难发现。
+TASKS_URL="https://github.com/joewang0430/chase-farm/releases/download/wthor-tasks-v1/wthor_tasks.tar.gz"
+TASKS_SHA="73c77abdd0a0d666c24cb06e1ae58fccf9264a24c692936e61423c4f700d8934"
+TASKS_N=200              # 分片数, 用于核对解压结果是否完整
 TMUX_SESSION="farm"
 
 HOST=$(hostname -s)
@@ -84,9 +91,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ "$LABEL" = "1" ]; then
-  [ -n "$TASKS" ] || die "--label 需要 --tasks <任务目录>"
-  [ -n "$LABEL_OUT" ] || die "--label 需要 --out <输出目录>"
-  [ -d "$TASKS" ] || die "任务目录不存在: $TASKS"
+  [ -n "$TASKS" ] || TASKS="$FARM_ROOT/tasks"
+  [ -n "$LABEL_OUT" ] || LABEL_OUT="$FARM_ROOT/labeled"
 fi
 
 # ---------------- 1. 环境自检 ----------------
@@ -165,9 +171,35 @@ if ! python3 "$REPO_DIR/verify_engine.py" "$ENGINE_BIN" \
 fi
 sed 's/^/    /' "$FARM_ROOT/.verify.out"
 
-# ---------------- 5. 开局池(标注模式用不上, 跳过) ----------------
+# ---------------- 5. 任务分片(标注模式) / 开局池(生成模式) ----------------
 if [ "$LABEL" = "1" ]; then
   log "  标注模式: 跳过开局池"
+  GOT_N=$(ls "$TASKS"/part_*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$GOT_N" = "$TASKS_N" ]; then
+    log "  任务分片已就绪: $GOT_N 片"
+  else
+    log "  下载任务分片(约 89MB)..."
+    command -v curl >/dev/null || die "没有 curl"
+    TB="$FARM_ROOT/wthor_tasks.tar.gz"
+    [ -s "$TB" ] || curl -fsSL -o "$TB" "$TASKS_URL" || die "下载任务分片失败: $TASKS_URL"
+    if command -v sha256sum >/dev/null; then
+      TGOT=$(sha256sum "$TB" | cut -d" " -f1)
+    elif command -v shasum >/dev/null; then
+      TGOT=$(shasum -a 256 "$TB" | cut -d" " -f1)
+    else
+      TGOT=""
+    fi
+    if [ -n "$TGOT" ] && [ "$TGOT" != "$TASKS_SHA" ]; then
+      rm -f "$TB"
+      die "任务分片校验不符!  期望 $TASKS_SHA  实得 $TGOT —— 已删除, 请重跑"
+    fi
+    log "  任务分片校验通过"
+    mkdir -p "$TASKS"
+    tar xzf "$TB" -C "$TASKS" || die "解压任务分片失败"
+    GOT_N=$(ls "$TASKS"/part_*.jsonl 2>/dev/null | wc -l | tr -d " ")
+    [ "$GOT_N" = "$TASKS_N" ] || die "解压后分片数不对: 期望 $TASKS_N 实得 $GOT_N"
+    log "  任务分片就绪: $GOT_N 片"
+  fi
 elif [ -s "$OPENINGS" ]; then
   log "  开局池已就绪: $(wc -l < "$OPENINGS") 条"
 else
