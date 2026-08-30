@@ -18,7 +18,8 @@
      A5 pcs 落在 [12,53]
      A6 T 只能是 0 或 Tsched 里出现过的温度
   B2 完整性: 对局序号是否连续(唯一能发现"数据根本没写进去"的检查)
-  B3 生成逻辑(全量): 走法可复原 / 确定段必走老师手 / 随机段确由选择器驱动
+  B3 生成逻辑: 走法可复原 / 确定段必走老师手 / 随机段确由选择器驱动 /
+     **采样形态** —— 每盘的随机点分布必须是「连续前缀 + 至多一个孤立点」
   B. 重复情况(不是错误, 但要知道)
      B1 完全相同的局面出现多少次
      B2 四重对称等价的局面出现多少次(训练时它们是同一个东西)
@@ -113,6 +114,11 @@ def main():
     ap.add_argument('--verify', type=int, default=0, help='抽多少条用引擎回验标签')
     ap.add_argument('--engine', default=None, help='回验用的引擎路径')
     ap.add_argument('--show', type=int, default=5, help='每类错误最多打印几条')
+    ap.add_argument('--sample', type=int, default=0,
+                    help='B/B3 只在这么多**盘**上跑(0=全量)。A 与 B2 始终全量 —— '
+                         '它们快, 且"字段错/丢数据"必须逐条查; B3 验的是"要么处处成立、'
+                         '要么系统性失效"的性质, 抽样与全量给出同样的结论。'
+                         '2000万条全量约100分钟, --sample 20000 约1分钟。')
     args = ap.parse_args()
 
     paths = ([args.shards] if args.shards.endswith('.jsonl')
@@ -149,26 +155,36 @@ def main():
         for i, why in lst[:args.show]:
             print("        #%d %s" % (i, why))
 
+    # 抽样: 必须**按整盘**抽, 不能按行抽 —— B3 要用同一盘的相邻记录做走法复原,
+    # 按行抽会把对局打散, 复原必然失败(那是抽样方式的错, 不是数据的错)。
+    brows = rows
+    if args.sample and args.sample < len(games):
+        rng0 = random.Random(20260830)
+        keep = set(rng0.sample(sorted(games), args.sample))
+        brows = [r for r in rows if (r['src'], r['g']) in keep]
+        print("\n(B/B3 抽样: %d 盘 / %d 条, 占全部 %.1f%%; A 与 B2 仍为全量)"
+              % (args.sample, len(brows), len(brows) / float(len(rows)) * 100))
+
     # ---------- B 重复 ----------
     print("\n" + "=" * 72)
     print("B. 重复情况")
     exact = collections.defaultdict(list)
     canon = collections.defaultdict(list)
-    for i, r in enumerate(rows):
+    for i, r in enumerate(brows):
         my, opp = int(r['my']), int(r['opp'])
         exact[(my, opp)].append(i)
         canon[canonical(my, opp)].append(i)
     n_uniq_e, n_uniq_c = len(exact), len(canon)
     print("  完全相同的局面: %d 个不同局面, 去重率 %.2f%%"
-          % (n_uniq_e, (1 - n_uniq_e / float(len(rows))) * 100))
+          % (n_uniq_e, (1 - n_uniq_e / float(len(brows))) * 100))
     print("  四重对称等价后: %d 个不同局面, 去重率 %.2f%%"
-          % (n_uniq_c, (1 - n_uniq_c / float(len(rows))) * 100))
+          % (n_uniq_c, (1 - n_uniq_c / float(len(brows))) * 100))
     # 按 pcs 拆开: 开局池只有 6.7 万条, 所以 pcs 12 附近的局面池是**有限**的,
     # 对局数一旦远超开局池规模, 低 pcs 段必然大量重复 —— 这是设计的必然, 不是 bug,
     # 但它意味着 early 段的多样性有天花板, 直接影响"该生成多少数据"的判断。
     canon_by_pcs = collections.defaultdict(set)
     cnt_by_pcs = collections.Counter()
-    for r in rows:
+    for r in brows:
         canon_by_pcs[r['pcs']].add(canonical(int(r['my']), int(r['opp'])))
         cnt_by_pcs[r['pcs']] += 1
     print("  按 pcs 的对称去重率(只列非零的档):")
@@ -233,7 +249,7 @@ def main():
     print("\n" + "=" * 72)
     print("B3. 生成逻辑(全量验证)")
     by_game = collections.defaultdict(list)
-    for r in rows:
+    for r in brows:
         by_game[(r['src'], r['g'])].append(r)
     n_link = n_link_bad = n_det = n_det_ok = n_rand = n_rand_diff = 0
     bad_ex = []
@@ -278,6 +294,35 @@ def main():
     print("  确定段(T=0) %d 条, 实走 != 老师best 的 %d 条  %s"
           % (n_det, det_bad, "PASS" if det_bad == 0 else "**FAIL**"))
     n_hard += det_bad
+    # B3d 采样形态: 每盘的 T 序列必须是
+    #   前缀连续 T>0 (随机段)  ->  确定段 T=0  ->  其中**至多一个**孤立的 T>0 (额外偏离点)
+    # 这一项验的是"随机放在哪里"这个设计本身, 是其余检查都盖不到的。
+    # 老方案(2026-08-30 之前)没有额外偏离点, 所以孤立点数为 0 —— 不是错误, 会分开计数。
+    shape_bad = []
+    n_extra0 = n_extra1 = 0
+    for key, recs in by_game.items():
+        recs.sort(key=lambda x: x['pcs'])
+        flags = [float(r['T']) > 0 for r in recs]
+        pre = 0
+        while pre < len(flags) and flags[pre]:
+            pre += 1
+        tail = [i for i in range(pre, len(flags)) if flags[i]]
+        if len(tail) == 0:
+            n_extra0 += 1
+        elif len(tail) == 1:
+            n_extra1 += 1
+        else:
+            shape_bad.append((key, [recs[i]['pcs'] for i in tail]))
+    tot_g = len(by_game)
+    print("  采样形态: 无额外偏离点 %d 盘(老方案/采到最优手), 恰好一个 %d 盘(%.1f%%), "
+          "**两个以上 %d 盘**  %s"
+          % (n_extra0, n_extra1, n_extra1 / float(max(1, tot_g)) * 100,
+             len(shape_bad), "PASS" if not shape_bad else "**FAIL**"))
+    for key, pcslist in shape_bad[:args.show]:
+        print("        %s g=%s 确定段里有 %d 个随机点: %s"
+              % (key[0], key[1], len(pcslist), pcslist))
+    n_hard += len(shape_bad)
+
     if n_rand:
         pr = n_rand_diff / float(n_rand)
         ok = 0.02 < pr < 0.98
