@@ -39,6 +39,7 @@ def label_shard(engine, src, dst, level, log):
     rows = [json.loads(l) for l in open(src) if l.strip()]
     tmp = dst + ".tmp"
     t0 = time.time()
+    last_log = t0
     fails = 0
     with open(tmp, 'w') as f:
         for i, r in enumerate(rows):
@@ -56,8 +57,12 @@ def label_shard(engine, src, dst, level, log):
             r['score'] = sc
             r['L'] = level
             f.write(json.dumps(r, separators=(',', ':')) + "\n")
-            if (i + 1) % 5000 == 0:
-                el = time.time() - t0
+            # 按**时间**打进度而不是按条数: 条数间隔在少核机器上可能几十分钟不出声,
+            # 看着像死机(实测在 1 核机器上踩过)。
+            now = time.time()
+            if now - last_log >= 60:
+                last_log = now
+                el = now - t0
                 log("    %s: %d/%d  %.1f分  %.3f秒/局面"
                     % (os.path.basename(src), i + 1, len(rows), el / 60, el / (i + 1)))
     os.rename(tmp, dst)
