@@ -402,6 +402,15 @@ def play_game(teacher, selector, rng, openings, temps=None):
         side = -side
 
     rand_until_pcs = RANDOM_UNTIL_PCS[rng.randrange(len(RANDOM_UNTIL_PCS))]
+    # 确定段里额外插**一处**偏离(2026-08-29 加, 用户提出):
+    # 原方案的随机全在前缀, 产出的是"双方连续犯错很多手"的局面; 而 MCTS 搜索树浅层
+    # 遇到的是"双方走得都好、只有一步偏离"。后者原方案一条都产不出。
+    # 做法: 在确定段里均匀抽一个 pcs, 那一手照样按 T 采样, 其余仍走老师最优。
+    # 范围 [rand_until, 52]: 下界是确定段第一手; 上界 52 —— pcs=53 记完即收工,
+    # 在那里偏离没有任何后续局面, 白费一次调用。rand_until>52 时不插。
+    extra_random_pcs = -1
+    if rand_until_pcs <= 52:
+        extra_random_pcs = rand_until_pcs + rng.randrange(52 - rand_until_pcs + 1)
     passes = 0
     out = []
     while passes < 2 and popcount(black | white) < 64:
@@ -426,7 +435,8 @@ def play_game(teacher, selector, rng, openings, temps=None):
             return None                    # 老师失联
         best, score = trows[0]             # 标签: 永远是老师的 top-1
 
-        in_random = pcs < rand_until_pcs
+        # in_random: 前缀随机段, 或那个额外插入的偏离点
+        in_random = (pcs < rand_until_pcs) or (pcs == extra_random_pcs)
         t_here = stage_temp(pcs, temps or (TEMPERATURE,)) if in_random else 0.0
         if PCS_MIN <= pcs <= PCS_MAX:
             out.append((pcs, my, opp, best, score, t_here))
