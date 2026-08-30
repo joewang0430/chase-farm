@@ -8,6 +8,11 @@
 #   ./bootstrap.sh --resume     撤销 STOP
 #   ./bootstrap.sh --status     看本机工人数与全场产量
 #
+# **标注模式**(给现成局面打标签, 用于云端跑 WTHOR 任务, 不需要共享文件系统):
+#   ./bootstrap.sh --label --tasks <任务目录> --out <输出目录> [--machine i --machines N]
+#   前面装引擎、校验、验收的步骤**完全复用**, 只是最后起 label_worker.py 而不是 worker.py。
+#   不生成开局池(标注用不上)。
+#
 # 约定: 家目录是 NFS 共享的, 所有机器共用 $FARM_ROOT ——
 #       引擎只需第一台编译一次, 开局池只生成一次, 分片全落到同一处, STOP 全场可见。
 #
@@ -61,13 +66,28 @@ esac
 
 WORKERS=0
 CHECK_ONLY=0
+LABEL=0
+TASKS=""
+LABEL_OUT=""
+MACHINE=0
+MACHINES=1
 while [ $# -gt 0 ]; do
   case "$1" in
-    --check)   CHECK_ONLY=1; shift ;;
-    --workers) WORKERS="$2"; shift 2 ;;
+    --check)    CHECK_ONLY=1; shift ;;
+    --workers)  WORKERS="$2"; shift 2 ;;
+    --label)    LABEL=1; shift ;;
+    --tasks)    TASKS="$2"; shift 2 ;;
+    --out)      LABEL_OUT="$2"; shift 2 ;;
+    --machine)  MACHINE="$2"; shift 2 ;;
+    --machines) MACHINES="$2"; shift 2 ;;
     *) die "未知参数: $1" ;;
   esac
 done
+if [ "$LABEL" = "1" ]; then
+  [ -n "$TASKS" ] || die "--label 需要 --tasks <任务目录>"
+  [ -n "$LABEL_OUT" ] || die "--label 需要 --out <输出目录>"
+  [ -d "$TASKS" ] || die "任务目录不存在: $TASKS"
+fi
 
 # ---------------- 1. 环境自检 ----------------
 log "环境自检..."
@@ -145,8 +165,10 @@ if ! python3 "$REPO_DIR/verify_engine.py" "$ENGINE_BIN" \
 fi
 sed 's/^/    /' "$FARM_ROOT/.verify.out"
 
-# ---------------- 5. 开局池 ----------------
-if [ -s "$OPENINGS" ]; then
+# ---------------- 5. 开局池(标注模式用不上, 跳过) ----------------
+if [ "$LABEL" = "1" ]; then
+  log "  标注模式: 跳过开局池"
+elif [ -s "$OPENINGS" ]; then
   log "  开局池已就绪: $(wc -l < "$OPENINGS") 条"
 else
   log "  生成 8 手开局池(对称去重全枚举, 约 1 分钟)..."
@@ -159,12 +181,28 @@ if [ "$CHECK_ONLY" = "1" ]; then
 fi
 
 # ---------------- 6. 起工人 ----------------
-[ -f "$STOP_FILE" ] && die "STOP 文件存在, 先 ./bootstrap.sh --resume"
-
 if [ "$WORKERS" = "0" ]; then
   WORKERS=$(( NCORE - RESERVE_CORES ))
   [ "$WORKERS" -lt 1 ] && WORKERS=1
 fi
+
+# ---- 标注模式: 前台跑到做完为止, 不用 tmux 也不用 STOP 文件 ----
+# 云上机器是我们独占的, 不需要"给别人让路"那套; 跑完自己退出, 便于脚本判断何时收结果。
+if [ "$LABEL" = "1" ]; then
+  mkdir -p "$LABEL_OUT" "$LOGS"
+  TOT=$(ls "$TASKS"/part_*.jsonl 2>/dev/null | wc -l)
+  log "标注模式: 任务 $TOT 片, 本机 $MACHINE/$MACHINES, $WORKERS 个进程"
+  python3 "$REPO_DIR/label_worker.py" \
+      --engine "$ENGINE_BIN" --tasks "$TASKS" --out "$LABEL_OUT" \
+      --machine "$MACHINE" --machines "$MACHINES" --workers "$WORKERS" \
+      2>&1 | tee -a "$LOGS/${HOST}_label.log"
+  rc=${PIPESTATUS[0]}
+  DONE=$(ls "$LABEL_OUT"/*.done.jsonl 2>/dev/null | wc -l)
+  log "标注结束(退出码 $rc), 本机可见的已完成分片 $DONE / $TOT"
+  exit $rc
+fi
+
+[ -f "$STOP_FILE" ] && die "STOP 文件存在, 先 ./bootstrap.sh --resume"
 
 RUNNING=$(pgrep -u "$USER" -f "worker.py" 2>/dev/null | wc -l)
 [ "$RUNNING" -gt 0 ] && die "本机已有 $RUNNING 个工人在跑, 先 --stop 或 pkill -u $USER -f worker.py"
