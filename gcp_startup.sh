@@ -25,6 +25,8 @@ M=$(meta machine-index); M=${M:-0}
 N=$(meta machines-total); N=${N:-1}
 echo "本机是 $M / $N"
 
+# 启动脚本的环境里**没有 HOME**, 而 bootstrap.sh 用 set -u, 不设会直接炸。
+export HOME=/root
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y build-essential git curl
@@ -32,7 +34,6 @@ apt-get install -y build-essential git curl
 cd /root
 [ -d chase-farm ] || git clone https://github.com/joewang0430/chase-farm.git
 cd chase-farm
-git pull --ff-only || true
 
 # 标注。bootstrap 会自己下任务分片并校验 sha256, 校验不过就中止。
 #
@@ -43,6 +44,9 @@ git pull --ff-only || true
 rc=1
 for attempt in $(seq 1 20); do
   echo "----- 第 $attempt 次尝试 $(date -u) -----"
+  # 每次重试前拉一次代码: 万一是代码 bug 导致的失败, 修好推上去机器能自己捡起来,
+  # 不用重建实例(实测踩过 HOME unbound 那次, 当时只能重建)。
+  git pull --ff-only || true
   ./bootstrap.sh --label --machine "$M" --machines "$N"
   rc=$?
   [ "$rc" = "0" ] && break

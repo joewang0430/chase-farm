@@ -23,7 +23,9 @@
 #   等价的优化版本(本机实测 8 秒, 与参考引擎 40/40 逐字段一致)。
 set -u
 
-FARM_ROOT="${FARM_ROOT:-$HOME/chase_farm}"
+# HOME 可能不存在: GCP/云厂商的**启动脚本**以 root 运行但环境里没有 HOME,
+# 配合 set -u 会直接炸("HOME: unbound variable")。机房和 SSH 登录时不会遇到, 实测踩过。
+FARM_ROOT="${FARM_ROOT:-${HOME:-/root}/chase_farm}"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENGINE_DIR="$FARM_ROOT/engine"
 ENGINE_BIN="$ENGINE_DIR/lEdax"
