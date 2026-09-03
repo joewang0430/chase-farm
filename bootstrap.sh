@@ -80,11 +80,13 @@ TASKS=""
 LABEL_OUT=""
 MACHINE=0
 MACHINES=1
+TIES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)    CHECK_ONLY=1; shift ;;
     --workers)  WORKERS="$2"; shift 2 ;;
     --label)    LABEL=1; shift ;;
+    --ties)     TIES=1; shift ;;
     --tasks)    TASKS="$2"; shift 2 ;;
     --out)      LABEL_OUT="$2"; shift 2 ;;
     --machine)  MACHINE="$2"; shift 2 ;;
@@ -237,9 +239,11 @@ if [ "$LABEL" = "1" ]; then
   mkdir -p "$LABEL_OUT" "$LOGS"
   TOT=$(ls "$TASKS"/part_*.jsonl 2>/dev/null | wc -l)
   log "标注模式: 任务 $TOT 片, 本机 $MACHINE/$MACHINES, $WORKERS 个进程"
+  TIES_ARGS=""
+  [ "$TIES" = "1" ] && TIES_ARGS="--ties"
   python3 "$REPO_DIR/label_worker.py" \
       --engine "$ENGINE_BIN" --tasks "$TASKS" --out "$LABEL_OUT" \
-      --machine "$MACHINE" --machines "$MACHINES" --workers "$WORKERS" \
+      --machine "$MACHINE" --machines "$MACHINES" --workers "$WORKERS" $TIES_ARGS \
       2>&1 | tee -a "$LOGS/${HOST}_label.log"
   rc=${PIPESTATUS[0]}
   DONE=$(ls "$LABEL_OUT"/*.done.jsonl 2>/dev/null | wc -l)

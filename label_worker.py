@@ -34,8 +34,26 @@ from worker import Edax, TEACHER_HINT, TEACHER_LEVEL   # noqa: E402
 from othello import pos_to_mv                          # noqa: E402
 
 
-def label_shard(engine, src, dst, level, log):
-    """标注一个分片。先写临时文件再改名 —— 半截文件不会被当成已完成。"""
+def hint_ties(engine, my, opp):
+    """取与榜首同分的全部着法(并列最优集合)。
+    hint 4 起步; 若返回的着法**全部**同分, 说明并列可能超出窗口, 升级 hint 8、16。
+    (Sensei 实测并列>3 的只占多解的 ~4%, 升级是罕见路径, 但不能漏。)
+    返回 (moves_list, top_score) 或 None。"""
+    for n in (4, 8, 16):
+        got = engine.hint(my, opp, n)
+        if not got:
+            return None
+        top = got[0][1]
+        ties = [pos for pos, sc in got if sc == top]
+        if len(ties) < len(got) or len(got) < n:
+            # 窗口内已见到更差的着法, 或合法着法本来就不足 n 个 -> 集合完整
+            return ties, top
+    return ties, top                      # 16 个全同分就到此为止(实际不会发生)
+
+
+def label_shard(engine, src, dst, level, log, ties=False):
+    """标注一个分片。先写临时文件再改名 —— 半截文件不会被当成已完成。
+    ties=True 时走并列集合口径: best 是着法列表, 另记 nb=集合大小。"""
     rows = [json.loads(l) for l in open(src) if l.strip()]
     tmp = dst + ".tmp"
     t0 = time.time()
@@ -44,6 +62,27 @@ def label_shard(engine, src, dst, level, log):
     with open(tmp, 'w') as f:
         for i, r in enumerate(rows):
             my, opp = int(r['my']), int(r['opp'])
+            if ties:
+                got = hint_ties(engine, my, opp)
+                if got is None:
+                    engine.restart()
+                    got = hint_ties(engine, my, opp)
+                    if got is None:
+                        fails += 1
+                        continue
+                mvs, sc = got
+                r['best'] = [pos_to_mv(p) for p in mvs]
+                r['nb'] = len(mvs)
+                r['score'] = sc
+                r['L'] = level
+                f.write(json.dumps(r, separators=(',', ':')) + "\n")
+                now = time.time()
+                if now - last_log >= 60:
+                    last_log = now
+                    el = now - t0
+                    log("    %s: %d/%d  %.1f分  %.3f秒/局面"
+                        % (os.path.basename(src), i + 1, len(rows), el / 60, el / (i + 1)))
+                continue
             got = engine.hint(my, opp, TEACHER_HINT)
             if not got:
                 # hint 内部已就地重试 3 次; 仍失败就重启引擎再试一次
@@ -101,7 +140,7 @@ def run_one(args, sub):
     engine = Edax(args.engine, level=args.level)
     n_ok = n_bad = 0
     for src, dst in todo:
-        a, b = label_shard(engine, src, dst, args.level, log)
+        a, b = label_shard(engine, src, dst, args.level, log, ties=args.ties)
         n_ok += a; n_bad += b
     engine.close()
     log("收工: 标注 %d 局面, 失败 %d" % (n_ok, n_bad))
@@ -116,6 +155,8 @@ def main():
     ap.add_argument('--machines', type=int, default=1, help='共几台')
     ap.add_argument('--workers', type=int, default=0, help='本机起几个进程(0=核数-2)')
     ap.add_argument('--level', type=int, default=TEACHER_LEVEL)
+    ap.add_argument('--ties', action='store_true',
+                    help='并列集合口径: hint4起步自动升级, best 为列表')
     ap.add_argument('--sub', type=int, default=-1, help='内部用: 子进程编号')
     args = ap.parse_args()
 
@@ -140,8 +181,8 @@ def main():
             [sys.executable, os.path.abspath(__file__),
              '--engine', args.engine, '--tasks', args.tasks, '--out', args.out,
              '--machine', str(args.machine), '--machines', str(args.machines),
-             '--workers', str(args.workers), '--level', str(args.level),
-             '--sub', str(s)]))
+             '--workers', str(args.workers), '--level', str(args.level)]
+            + (['--ties'] if args.ties else []) + ['--sub', str(s)]))
     rc = 0
     for p in procs:
         rc |= p.wait()
