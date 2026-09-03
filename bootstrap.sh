@@ -42,9 +42,9 @@ RESERVE_CORES=4          # 给系统和其他用户留的核数
 
 # 标注任务分片: 放在 GitHub Release, 不进 git 历史(89MB 会让每次 clone 都变慢)。
 # sha256 必须核对 —— 传输出错会让几百核心小时跑在坏数据上, 而且事后极难发现。
-TASKS_URL="https://github.com/joewang0430/chase-farm/releases/download/wthor-tasks-v1/wthor_tasks.tar.gz"
-TASKS_SHA="73c77abdd0a0d666c24cb06e1ae58fccf9264a24c692936e61423c4f700d8934"
-TASKS_N=200              # 分片数, 用于核对解压结果是否完整
+TASKS_URL="https://github.com/joewang0430/chase-farm/releases/download/lab-tasks-v2/lab_tasks.tar.gz"
+TASKS_SHA="1bd6e8751fbe4a54e97977d6d04a392865c83a894e1e4565235d6403c2356a6e"
+TASKS_N=1511             # 分片数, 用于核对解压结果是否完整
 TMUX_SESSION="farm"
 
 HOST=$(hostname -s)
@@ -148,10 +148,23 @@ else
   log "    编译器: $CC_BIN ($($CC_BIN --version | head -1))"
 
   if [ ! -d "$EDAX_SRC" ]; then
-    git clone --quiet https://github.com/abulmo/edax-reversi.git "$EDAX_SRC" \
-      || die "clone Edax 失败(网络?)"
-    ( cd "$EDAX_SRC" && git checkout --quiet "$EDAX_COMMIT" ) \
-      || die "切到验证过的 commit $EDAX_COMMIT 失败"
+    # 优先用 curl 拉 commit 的源码包: 某些云主机(实测 RunPod)封了 git 的 upload-pack,
+    # curl 能拿到 HTTP 200 但 `git clone` 会退化成要求输入用户名而失败。
+    # tar 包按 commit 取, 与 git checkout 该 commit 得到的源码等价。
+    log "    下载 Edax 源码(commit ${EDAX_COMMIT:0:12})..."
+    TGZ="$FARM_ROOT/edax-src.tar.gz"
+    if command -v curl >/dev/null && curl -fsSL -o "$TGZ" \
+         "https://github.com/abulmo/edax-reversi/archive/$EDAX_COMMIT.tar.gz"; then
+      mkdir -p "$EDAX_SRC"
+      tar xzf "$TGZ" -C "$EDAX_SRC" --strip-components=1 \
+        || die "解压 Edax 源码失败"
+    else
+      log "    curl 不可用或下载失败, 退回 git clone"
+      git clone --quiet https://github.com/abulmo/edax-reversi.git "$EDAX_SRC" \
+        || die "Edax 源码获取失败(curl 与 git 都不通)"
+      ( cd "$EDAX_SRC" && git checkout --quiet "$EDAX_COMMIT" ) \
+        || die "切到验证过的 commit $EDAX_COMMIT 失败"
+    fi
   fi
   [ -s "$EDAX_SRC/src/all.c" ] || die "源码里找不到 src/all.c(Edax 版本不对?)"
 
@@ -210,7 +223,9 @@ if [ "$LABEL" = "1" ]; then
     fi
     log "  任务分片校验通过"
     mkdir -p "$TASKS"
-    tar xzf "$TB" -C "$TASKS" || die "解压任务分片失败"
+    # 包内顶层目录是 lab_tasks/, 解到父目录再让 TASKS 指向它
+    tar xzf "$TB" -C "$(dirname "$TASKS")" || die "解压任务分片失败"
+    [ -d "$(dirname "$TASKS")/lab_tasks" ] && TASKS="$(dirname "$TASKS")/lab_tasks"
     GOT_N=$(ls "$TASKS"/part_*.jsonl 2>/dev/null | wc -l | tr -d " ")
     [ "$GOT_N" = "$TASKS_N" ] || die "解压后分片数不对: 期望 $TASKS_N 实得 $GOT_N"
     log "  任务分片就绪: $GOT_N 片"
