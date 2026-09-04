@@ -76,6 +76,8 @@ def label_shard(engine, src, dst, level, log, ties=False):
                 r['score'] = sc
                 r['L'] = level
                 f.write(json.dumps(r, separators=(',', ':')) + "\n")
+                f.flush()          # 立刻落盘: 不刷的话默认 8KB 缓冲, 几百行都看不见,
+                                   # 进度无法确认(实测机房踩过: 日志说标了 278 行, 文件 0 字节)
                 now = time.time()
                 if now - last_log >= 60:
                     last_log = now
@@ -96,6 +98,7 @@ def label_shard(engine, src, dst, level, log, ties=False):
             r['score'] = sc
             r['L'] = level
             f.write(json.dumps(r, separators=(',', ':')) + "\n")
+            f.flush()              # 同上: 每行立刻落盘, 保证进度可见
             # 按**时间**打进度而不是按条数: 条数间隔在少核机器上可能几十分钟不出声,
             # 看着像死机(实测在 1 核机器上踩过)。
             now = time.time()

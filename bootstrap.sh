@@ -42,9 +42,9 @@ RESERVE_CORES=4          # 给系统和其他用户留的核数
 
 # 标注任务分片: 放在 GitHub Release, 不进 git 历史(89MB 会让每次 clone 都变慢)。
 # sha256 必须核对 —— 传输出错会让几百核心小时跑在坏数据上, 而且事后极难发现。
-TASKS_URL="https://github.com/joewang0430/chase-farm/releases/download/lab-tasks-v2/lab_tasks.tar.gz"
-TASKS_SHA="1bd6e8751fbe4a54e97977d6d04a392865c83a894e1e4565235d6403c2356a6e"
-TASKS_N=1511             # 分片数, 用于核对解压结果是否完整
+TASKS_URL="https://github.com/joewang0430/chase-farm/releases/download/lab-tasks-v3/lab_tasks_v3.tar.gz"
+TASKS_SHA="dacad3c5d5a8167689c279b689e859239808cc9742a9449416888cd708d2425e"
+TASKS_N=37769             # 分片数, 用于核对解压结果是否完整
 TMUX_SESSION="farm"
 
 HOST=$(hostname -s)
@@ -225,7 +225,7 @@ if [ "$LABEL" = "1" ]; then
     mkdir -p "$TASKS"
     # 包内顶层目录是 lab_tasks/, 解到父目录再让 TASKS 指向它
     tar xzf "$TB" -C "$(dirname "$TASKS")" || die "解压任务分片失败"
-    [ -d "$(dirname "$TASKS")/lab_tasks" ] && TASKS="$(dirname "$TASKS")/lab_tasks"
+    [ -d "$(dirname "$TASKS")/lab_tasks_small" ] && TASKS="$(dirname "$TASKS")/lab_tasks_small"
     GOT_N=$(ls "$TASKS"/part_*.jsonl 2>/dev/null | wc -l | tr -d " ")
     [ "$GOT_N" = "$TASKS_N" ] || die "解压后分片数不对: 期望 $TASKS_N 实得 $GOT_N"
     log "  任务分片就绪: $GOT_N 片"
